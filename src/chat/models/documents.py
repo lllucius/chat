@@ -146,10 +146,11 @@ class DocumentSearchRequest(BaseModel):
 class DocumentSearchResult(BaseModel):
     """Document search result schema."""
     
-    chunk: DocumentChunkResponse
-    document: DocumentResponse
+    chunk_content: str
+    document_id: str
     similarity_score: float
     rank: int
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class DocumentSearchResponse(BaseModel):

@@ -229,7 +229,7 @@ class AuthService:
         
         logger.info("User updated successfully", user_id=user_id)
         
-        return UserResponse.from_orm(user)
+        return UserResponse.model_validate(user)
     
     async def deactivate_user(self, user_id: str, db_session: AsyncSession) -> bool:
         """Deactivate user account.

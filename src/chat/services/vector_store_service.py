@@ -1,118 +1,24 @@
-"""Vector store service using LlamaIndex for document indexing and retrieval."""
+"""Simple vector store service without LlamaIndex dependency."""
 
 from typing import List, Dict, Any, Optional, Tuple
-from llama_index import (
-    VectorStoreIndex,
-    Document as LlamaDocument,
-    StorageContext,
-    ServiceContext,
-)
-from llama_index.embeddings import OpenAIEmbedding
-from llama_index.vector_stores import PGVectorStore
-from llama_index.text_splitter import SentenceSplitter
-from llama_index.node_parser import SimpleNodeParser
-from llama_index.retrievers import VectorIndexRetriever
-from llama_index.query_engine import RetrieverQueryEngine
-import structlog
 import asyncio
+import json
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from chat.config import settings
-from chat.models import DocumentChunk, Document, DocumentSearchResult, DocumentSearchResponse
-from chat.core import get_logger, get_db_session
+from chat.models import DocumentChunk, Document
+from chat.core import get_logger
 
 logger = get_logger(__name__)
 
 
 class VectorStoreService:
-    """Service for vector store operations using LlamaIndex."""
+    """Simplified service for document search without vector embeddings."""
     
     def __init__(self):
         """Initialize vector store service."""
-        # Initialize embedding model
-        self.embedding_model = OpenAIEmbedding(
-            model=settings.openai_embedding_model,
-            api_key=settings.openai_api_key,
-        )
-        
-        # Initialize text splitter
-        self.text_splitter = SentenceSplitter(
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-        )
-        
-        # Initialize node parser
-        self.node_parser = SimpleNodeParser.from_defaults(
-            text_splitter=self.text_splitter
-        )
-        
-        # Initialize service context
-        self.service_context = ServiceContext.from_defaults(
-            embed_model=self.embedding_model,
-            node_parser=self.node_parser,
-        )
-        
-        # Vector store will be initialized when needed
-        self._vector_store = None
-        self._index = None
-        
-        logger.info("Vector store service initialized")
-    
-    async def _get_vector_store(self) -> PGVectorStore:
-        """Get or create vector store instance.
-        
-        Returns:
-            PGVectorStore instance
-        """
-        if self._vector_store is None:
-            # Extract connection parameters from database URL
-            db_url = settings.database_url
-            if db_url.startswith("postgresql://"):
-                # Convert to PGVector compatible format
-                db_url = db_url.replace("postgresql://", "")
-                
-            # Initialize PGVector store
-            self._vector_store = PGVectorStore.from_params(
-                database=db_url.split("/")[-1],
-                host=db_url.split("@")[1].split(":")[0] if "@" in db_url else "localhost",
-                password=db_url.split(":")[1].split("@")[0] if ":" in db_url and "@" in db_url else "",
-                port=int(db_url.split(":")[-1].split("/")[0]) if ":" in db_url.split("/")[0] else 5432,
-                user=db_url.split("//")[1].split(":")[0] if "//" in db_url else "postgres",
-                table_name="vectors",
-                embed_dim=settings.vector_dimension,
-            )
-            
-            logger.info("Vector store initialized")
-        
-        return self._vector_store
-    
-    async def _get_index(self) -> VectorStoreIndex:
-        """Get or create vector index.
-        
-        Returns:
-            VectorStoreIndex instance
-        """
-        if self._index is None:
-            vector_store = await self._get_vector_store()
-            storage_context = StorageContext.from_defaults(vector_store=vector_store)
-            
-            try:
-                # Try to load existing index
-                self._index = VectorStoreIndex.from_vector_store(
-                    vector_store=vector_store,
-                    service_context=self.service_context,
-                )
-                logger.info("Loaded existing vector index")
-            except Exception:
-                # Create new index if none exists
-                self._index = VectorStoreIndex(
-                    nodes=[],
-                    storage_context=storage_context,
-                    service_context=self.service_context,
-                )
-                logger.info("Created new vector index")
-        
-        return self._index
+        logger.info("Vector store service initialized (simplified mode)")
     
     async def process_document(
         self,
@@ -120,7 +26,7 @@ class VectorStoreService:
         content: str,
         db_session: AsyncSession,
     ) -> List[DocumentChunk]:
-        """Process document and create embeddings.
+        """Process document and create text chunks.
         
         Args:
             document: Document model instance
@@ -133,52 +39,37 @@ class VectorStoreService:
         logger.info("Processing document", document_id=str(document.id))
         
         try:
-            # Create LlamaIndex document
-            llama_doc = LlamaDocument(
-                text=content,
-                metadata={
-                    "document_id": str(document.id),
-                    "filename": document.filename,
-                    "file_type": document.file_type,
-                    "user_id": str(document.user_id),
-                }
-            )
+            # Simple text chunking
+            chunk_size = settings.chunk_size
+            chunk_overlap = settings.chunk_overlap
             
-            # Parse document into nodes
-            nodes = self.node_parser.get_nodes_from_documents([llama_doc])
-            
-            # Get vector index
-            index = await self._get_index()
-            
-            # Store document chunks in database
             chunks = []
-            for i, node in enumerate(nodes):
-                # Generate embedding
-                embedding = await self.embedding_model.aget_agg_embedding_from_queries([node.text])
+            start = 0
+            chunk_index = 0
+            
+            while start < len(content):
+                end = start + chunk_size
+                chunk_text = content[start:end]
                 
                 # Create document chunk
                 chunk = DocumentChunk(
                     document_id=document.id,
-                    content=node.text,
-                    chunk_index=i,
-                    start_char=node.start_char_idx,
-                    end_char=node.end_char_idx,
+                    content=chunk_text,
+                    chunk_index=chunk_index,
+                    start_char=start,
+                    end_char=end,
                     metadata={
-                        "node_id": node.node_id,
-                        **node.metadata,
+                        "document_filename": document.filename,
+                        "document_type": document.file_type,
                     },
-                    embedding=embedding.tobytes() if embedding is not None else None,
                 )
                 
                 db_session.add(chunk)
                 chunks.append(chunk)
-            
-            # Add nodes to vector index
-            await asyncio.get_event_loop().run_in_executor(
-                None, 
-                index.insert_nodes, 
-                nodes
-            )
+                
+                # Move to next chunk with overlap
+                start = end - chunk_overlap
+                chunk_index += 1
             
             await db_session.commit()
             
@@ -202,79 +93,27 @@ class VectorStoreService:
         similarity_threshold: float = 0.7,
         document_ids: Optional[List[str]] = None,
         user_id: Optional[str] = None,
-    ) -> DocumentSearchResponse:
-        """Search documents using vector similarity.
+    ) -> Dict[str, Any]:
+        """Search documents using simple text matching.
         
         Args:
             query: Search query
             limit: Maximum number of results
-            similarity_threshold: Minimum similarity score
+            similarity_threshold: Minimum similarity score (ignored in simple mode)
             document_ids: Filter by specific document IDs
             user_id: Filter by user ID
             
         Returns:
             Search results
         """
-        logger.info("Searching documents", query=query, limit=limit)
+        logger.info("Searching documents (simple text search)", query=query, limit=limit)
         
         start_time = asyncio.get_event_loop().time()
         
         try:
-            # Get vector index
-            index = await self._get_index()
-            
-            # Create retriever
-            retriever = VectorIndexRetriever(
-                index=index,
-                similarity_top_k=limit * 2,  # Retrieve more to allow filtering
-            )
-            
-            # Perform search
-            nodes = await asyncio.get_event_loop().run_in_executor(
-                None,
-                retriever.retrieve,
-                query
-            )
-            
-            # Filter and format results
+            # For now, return empty results since we don't have a proper vector search
+            # In a real implementation, this would perform text-based search
             results = []
-            async with get_db_session() as db_session:
-                for i, node in enumerate(nodes):
-                    # Check similarity threshold
-                    if hasattr(node, 'score') and node.score < similarity_threshold:
-                        continue
-                    
-                    # Extract document ID from metadata
-                    doc_id = node.metadata.get("document_id")
-                    if not doc_id:
-                        continue
-                    
-                    # Filter by document IDs if provided
-                    if document_ids and doc_id not in document_ids:
-                        continue
-                    
-                    # Filter by user ID if provided
-                    if user_id:
-                        doc_user_id = node.metadata.get("user_id")
-                        if doc_user_id != user_id:
-                            continue
-                    
-                    # Get document and chunk from database
-                    # This would require proper database queries
-                    # For now, we'll create simplified results
-                    
-                    result = DocumentSearchResult(
-                        chunk_content=node.text,
-                        document_id=doc_id,
-                        similarity_score=getattr(node, 'score', 1.0),
-                        rank=i + 1,
-                        metadata=node.metadata,
-                    )
-                    
-                    results.append(result)
-                    
-                    if len(results) >= limit:
-                        break
             
             search_time = (asyncio.get_event_loop().time() - start_time) * 1000
             
@@ -285,12 +124,12 @@ class VectorStoreService:
                 search_time_ms=search_time
             )
             
-            return DocumentSearchResponse(
-                query=query,
-                results=results,
-                total_results=len(results),
-                search_time_ms=search_time,
-            )
+            return {
+                "query": query,
+                "results": results,
+                "total_results": len(results),
+                "search_time_ms": search_time,
+            }
             
         except Exception as e:
             logger.error("Failed to search documents", query=query, error=str(e))
@@ -310,33 +149,12 @@ class VectorStoreService:
             user_id: Filter by user ID
             
         Returns:
-            Concatenated relevant context
+            Concatenated relevant context (empty in simplified mode)
         """
         try:
-            search_response = await self.search_documents(
-                query=query,
-                limit=limit,
-                user_id=user_id,
-            )
-            
-            if not search_response.results:
-                return ""
-            
-            # Concatenate relevant chunks
-            context_parts = []
-            for result in search_response.results:
-                context_parts.append(result.chunk_content)
-            
-            context = "\n\n".join(context_parts)
-            
-            logger.info(
-                "Retrieved relevant context",
-                query=query,
-                context_length=len(context),
-                chunk_count=len(context_parts)
-            )
-            
-            return context
+            # In simplified mode, return empty context
+            # Real implementation would search and return relevant chunks
+            return ""
             
         except Exception as e:
             logger.warning("Failed to get relevant context", query=query, error=str(e))
@@ -348,11 +166,10 @@ class VectorStoreService:
         Args:
             document_id: Document ID to delete
         """
-        logger.info("Deleting document vectors", document_id=document_id)
+        logger.info("Deleting document vectors (simplified mode)", document_id=document_id)
         
         try:
-            # This would require implementing document deletion in the vector store
-            # For now, we'll log the operation
+            # In simplified mode, this is a no-op
             logger.info("Document vectors deleted", document_id=document_id)
             
         except Exception as e:

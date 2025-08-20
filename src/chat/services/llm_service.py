@@ -1,14 +1,10 @@
-"""LLM service using LangChain for conversation management."""
+"""LLM service using OpenAI for conversation management."""
 
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from langchain.llms import OpenAI
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import BaseMessage, HumanMessage, AIMessage, SystemMessage
-from langchain.memory import ConversationBufferWindowMemory
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
-from langchain.callbacks.base import AsyncCallbackHandler
 import asyncio
+import json
 import structlog
+import openai
 
 from chat.config import settings
 from chat.models import MessageRole, MessageResponse
@@ -17,100 +13,50 @@ from chat.core import get_logger
 logger = get_logger(__name__)
 
 
-class StreamingCallbackHandler(AsyncCallbackHandler):
-    """Callback handler for streaming LLM responses."""
-    
-    def __init__(self):
-        self.tokens = []
-        self.done = False
-    
-    async def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
-        """Handle new token from LLM."""
-        self.tokens.append(token)
-    
-    async def on_llm_end(self, response, **kwargs: Any) -> None:
-        """Handle LLM completion."""
-        self.done = True
-
-
 class LLMService:
-    """Service for LLM operations using LangChain."""
+    """Service for LLM operations using OpenAI."""
     
     def __init__(self):
         """Initialize LLM service."""
-        self.chat_model = ChatOpenAI(
-            model=settings.openai_model,
-            temperature=settings.openai_temperature,
-            max_tokens=settings.openai_max_tokens,
-            openai_api_key=settings.openai_api_key,
-        )
-        
-        self.streaming_model = ChatOpenAI(
-            model=settings.openai_model,
-            temperature=settings.openai_temperature,
-            max_tokens=settings.openai_max_tokens,
-            openai_api_key=settings.openai_api_key,
-            streaming=True,
-        )
+        # Initialize OpenAI client
+        openai.api_key = settings.openai_api_key
+        self.client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
         
         logger.info("LLM service initialized", model=settings.openai_model)
     
-    def _create_memory(self, conversation_history: List[MessageResponse]) -> ConversationBufferWindowMemory:
-        """Create conversation memory from history.
-        
-        Args:
-            conversation_history: List of previous messages
-            
-        Returns:
-            Configured memory instance
-        """
-        memory = ConversationBufferWindowMemory(
-            k=settings.conversation_memory_size,
-            return_messages=True
-        )
-        
-        # Add conversation history to memory
-        for message in conversation_history:
-            if message.role == MessageRole.USER:
-                memory.chat_memory.add_user_message(message.content)
-            elif message.role == MessageRole.ASSISTANT:
-                memory.chat_memory.add_ai_message(message.content)
-        
-        return memory
-    
-    def _messages_to_langchain(
+    def _messages_to_openai(
         self,
         messages: List[MessageResponse],
         system_prompt: Optional[str] = None
-    ) -> List[BaseMessage]:
-        """Convert message history to LangChain format.
+    ) -> List[Dict[str, str]]:
+        """Convert message history to OpenAI format.
         
         Args:
             messages: List of messages
             system_prompt: Optional system prompt
             
         Returns:
-            List of LangChain messages
+            List of OpenAI messages
         """
-        langchain_messages = []
+        openai_messages = []
         
         # Add system prompt if provided
         if system_prompt:
-            langchain_messages.append(SystemMessage(content=system_prompt))
+            openai_messages.append({"role": "system", "content": system_prompt})
         elif not any(msg.role == MessageRole.SYSTEM for msg in messages):
             # Add default system prompt if none exists
-            langchain_messages.append(SystemMessage(content=settings.default_system_prompt))
+            openai_messages.append({"role": "system", "content": settings.default_system_prompt})
         
         # Convert messages
         for message in messages:
             if message.role == MessageRole.USER:
-                langchain_messages.append(HumanMessage(content=message.content))
+                openai_messages.append({"role": "user", "content": message.content})
             elif message.role == MessageRole.ASSISTANT:
-                langchain_messages.append(AIMessage(content=message.content))
+                openai_messages.append({"role": "assistant", "content": message.content})
             elif message.role == MessageRole.SYSTEM:
-                langchain_messages.append(SystemMessage(content=message.content))
+                openai_messages.append({"role": "system", "content": message.content})
         
-        return langchain_messages
+        return openai_messages
     
     async def generate_response(
         self,
@@ -134,32 +80,28 @@ class LLMService:
         """
         logger.info("Generating response", user_message_length=len(user_message))
         
-        # Create model with custom parameters if provided
-        model = self.chat_model
-        if temperature is not None or max_tokens is not None:
-            model = ChatOpenAI(
-                model=settings.openai_model,
-                temperature=temperature or settings.openai_temperature,
-                max_tokens=max_tokens or settings.openai_max_tokens,
-                openai_api_key=settings.openai_api_key,
-            )
-        
         # Prepare messages
-        messages = self._messages_to_langchain(conversation_history, system_prompt)
-        messages.append(HumanMessage(content=user_message))
+        messages = self._messages_to_openai(conversation_history, system_prompt)
+        messages.append({"role": "user", "content": user_message})
         
         try:
             # Generate response
-            response = await model.agenerate([messages])
-            response_text = response.generations[0][0].text
+            response = await self.client.chat.completions.create(
+                model=settings.openai_model,
+                messages=messages,
+                temperature=temperature or settings.openai_temperature,
+                max_tokens=max_tokens or settings.openai_max_tokens,
+            )
+            
+            response_text = response.choices[0].message.content
             
             logger.info(
                 "Response generated",
-                response_length=len(response_text),
-                token_usage=response.llm_output.get("token_usage") if response.llm_output else None
+                response_length=len(response_text) if response_text else 0,
+                token_usage=response.usage.model_dump() if response.usage else None
             )
             
-            return response_text
+            return response_text or ""
             
         except Exception as e:
             logger.error("Failed to generate response", error=str(e))
@@ -187,41 +129,23 @@ class LLMService:
         """
         logger.info("Streaming response", user_message_length=len(user_message))
         
-        # Create streaming callback handler
-        callback_handler = StreamingCallbackHandler()
-        
-        # Create model with custom parameters if provided
-        model = ChatOpenAI(
-            model=settings.openai_model,
-            temperature=temperature or settings.openai_temperature,
-            max_tokens=max_tokens or settings.openai_max_tokens,
-            openai_api_key=settings.openai_api_key,
-            streaming=True,
-            callbacks=[callback_handler],
-        )
-        
         # Prepare messages
-        messages = self._messages_to_langchain(conversation_history, system_prompt)
-        messages.append(HumanMessage(content=user_message))
+        messages = self._messages_to_openai(conversation_history, system_prompt)
+        messages.append({"role": "user", "content": user_message})
         
         try:
-            # Start generation in background
-            task = asyncio.create_task(model.agenerate([messages]))
+            # Stream response
+            stream = await self.client.chat.completions.create(
+                model=settings.openai_model,
+                messages=messages,
+                temperature=temperature or settings.openai_temperature,
+                max_tokens=max_tokens or settings.openai_max_tokens,
+                stream=True,
+            )
             
-            # Stream tokens as they arrive
-            while not callback_handler.done:
-                if callback_handler.tokens:
-                    token = callback_handler.tokens.pop(0)
-                    yield token
-                else:
-                    await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
-            
-            # Yield any remaining tokens
-            while callback_handler.tokens:
-                yield callback_handler.tokens.pop(0)
-            
-            # Wait for completion
-            await task
+            async for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
             
             logger.info("Response streaming completed")
             
@@ -254,9 +178,15 @@ class LLMService:
         Title:"""
         
         try:
-            messages = [HumanMessage(content=title_prompt)]
-            response = await self.chat_model.agenerate([messages])
-            title = response.generations[0][0].text.strip()
+            messages = [{"role": "user", "content": title_prompt}]
+            response = await self.client.chat.completions.create(
+                model=settings.openai_model,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=20,
+            )
+            
+            title = response.choices[0].message.content or ""
             
             # Clean up the title
             title = title.replace('"', '').replace("'", '').strip()
