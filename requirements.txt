@@ -1,0 +1,54 @@
+# Core API Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+
+# Database
+sqlalchemy>=2.0.36
+alembic>=1.14.0
+asyncpg>=0.30.0
+psycopg2-binary>=2.9.10
+
+# Vector Store
+pgvector>=0.3.6
+
+# LLM and AI
+langchain>=0.3.10
+langchain-openai>=0.2.10
+langchain-community>=0.3.9
+langgraph>=0.2.52
+
+# Authentication and Security
+python-jose[cryptography]>=3.3.0
+python-multipart>=0.0.19
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.2.1
+
+# File Processing
+python-docx>=1.1.2
+PyPDF2>=3.0.1
+python-magic>=0.4.27
+
+# HTTP Client
+httpx>=0.28.1
+aiofiles>=24.1.0
+
+# CLI
+click>=8.1.7
+rich>=13.9.4
+
+# Logging and Monitoring
+structlog>=24.4.0
+
+# Development and Testing
+pytest>=8.3.4
+pytest-asyncio>=0.24.0
+pytest-cov>=6.0.0
+black>=24.10.0
+isort>=5.13.2
+flake8>=7.1.1
+mypy>=1.13.0
+
+# Environment
+python-dotenv>=1.0.1
